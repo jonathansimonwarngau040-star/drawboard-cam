@@ -31,6 +31,7 @@ import urllib.request
 import webbrowser
 import tkinter as tk
 import winreg
+from tkinter import font as tkfont
 from tkinter import ttk
 import xml.etree.ElementTree as ET
 from logging.handlers import RotatingFileHandler
@@ -690,7 +691,7 @@ def ensure_shortcuts(first_run: bool):
         log.warning("Verknüpfungen: %s", e)
 
 
-def make_icon():
+def make_icon(size=64):
     im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
     d.rounded_rectangle((2, 2, 62, 62), 12, fill=(21, 101, 192, 255))
@@ -698,6 +699,16 @@ def make_icon():
     d.polygon([(22, 22), (26, 15), (38, 15), (42, 22)], fill="white")
     d.ellipse((23, 26, 41, 44), fill=(21, 101, 192, 255))
     d.ellipse((27, 30, 37, 40), fill="white")
+    if size != 64:
+        big = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        f = size / 64
+        d = ImageDraw.Draw(big)
+        d.rounded_rectangle((2 * f, 2 * f, 62 * f, 62 * f), 12 * f, fill=(21, 101, 192, 255))
+        d.rounded_rectangle((10 * f, 22 * f, 54 * f, 50 * f), 5 * f, fill="white")
+        d.polygon([(22 * f, 22 * f), (26 * f, 15 * f), (38 * f, 15 * f), (42 * f, 22 * f)], fill="white")
+        d.ellipse((23 * f, 26 * f, 41 * f, 44 * f), fill=(21, 101, 192, 255))
+        d.ellipse((27 * f, 30 * f, 37 * f, 40 * f), fill="white")
+        return big
     return im
 
 
@@ -718,8 +729,14 @@ class SettingsWindow:
         self.root.title(TITLE)
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
+        self.scale = max(1.0, self.root.winfo_fpixels("1i") / 96.0)
         try:
-            self._icon_img = ImageTk.PhotoImage(make_icon())
+            for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+                tkfont.nametofont(name).configure(family="Segoe UI", size=10)
+        except Exception:
+            pass
+        try:
+            self._icon_img = ImageTk.PhotoImage(make_icon(256))
             self.root.iconphoto(True, self._icon_img)
         except Exception:
             pass
@@ -733,7 +750,7 @@ class SettingsWindow:
         f.grid(sticky="nsew")
 
         self.v_status = tk.StringVar()
-        ttk.Label(f, textvariable=self.v_status, font=("Segoe UI", 11, "bold"), wraplength=460).grid(
+        ttk.Label(f, textvariable=self.v_status, font=("Segoe UI", 11, "bold"), wraplength=int(460 * self.scale)).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
         box = ttk.LabelFrame(f, text="Was soll mit neuen Fotos passieren?", padding=8)
@@ -762,7 +779,7 @@ class SettingsWindow:
         ttk.Button(dbox, text="Einfügen testen (3 Sek. Zeit, um zu Drawboard zu wechseln)",
                    command=self.worker.test_paste).grid(row=0, column=0, sticky="w")
         self.v_fg = tk.StringVar()
-        ttk.Label(dbox, textvariable=self.v_fg, wraplength=460, foreground="#555").grid(
+        ttk.Label(dbox, textvariable=self.v_fg, wraplength=int(460 * self.scale), foreground="#555").grid(
             row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Label(dbox, text="Letzte Ereignisse:").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.events = tk.Listbox(dbox, height=7, width=78, activestyle="none")
@@ -840,6 +857,23 @@ class SettingsWindow:
 
 # ---------------------------------------------------------------- Start
 
+def enable_sharp_rendering():
+    """Windows sagen: Wir zeichnen selbst in voller Auflösung → kein unscharfes Hochskalieren."""
+    try:
+        user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):  # PER_MONITOR_AWARE_V2
+            return
+    except Exception:
+        pass
+    try:
+        ctypes.WinDLL("shcore").SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
 def main():
     autostart = "--autostart" in sys.argv
     kernel32.CreateMutexW(None, False, "Local\\DrawboardCamSingleInstance")
@@ -851,6 +885,7 @@ def main():
         return
     kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x4000)  # BELOW_NORMAL
 
+    enable_sharp_rendering()
     first_run = not os.path.exists(CFG_FILE)
     threading.Thread(target=ensure_shortcuts, args=(first_run,), daemon=True).start()
 
