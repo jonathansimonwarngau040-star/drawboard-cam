@@ -28,9 +28,15 @@ class PhotosActivity : AppCompatActivity() {
         setContentView(R.layout.activity_photos)
         grid = findViewById(R.id.grid)
         empty = findViewById(R.id.empty)
+        supportActionBar?.setDisplayHomeAsUpEnabled(true)
         grid.layoutManager = GridLayoutManager(this, 3)
         grid.adapter = Adapter()
         reload()
+    }
+
+    override fun onSupportNavigateUp(): Boolean {
+        finish()
+        return true
     }
 
     private fun reload() {

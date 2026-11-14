@@ -20,6 +20,8 @@ import io
 import json
 import logging
 import os
+import queue
+import subprocess
 import sys
 import threading
 import time
@@ -27,12 +29,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import tkinter as tk
 import winreg
+from tkinter import ttk
 import xml.etree.ElementTree as ET
 from logging.handlers import RotatingFileHandler
 
 import pystray
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 APP = "DrawboardCam"
 TITLE = "Drawboard-Kamera"
@@ -46,6 +50,36 @@ POLL_DRAWBOARD_CLOSED = 4.0
 CFG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP)
 CFG_FILE = os.path.join(CFG_DIR, "config.json")
 os.makedirs(CFG_DIR, exist_ok=True)
+_cfg_lock = threading.Lock()
+
+
+def read_cfg() -> dict:
+    with _cfg_lock:
+        try:
+            with open(CFG_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, ValueError):
+            return {}
+
+
+def write_cfg(**changes):
+    with _cfg_lock:
+        try:
+            with open(CFG_FILE, encoding="utf-8") as f:
+                c = json.load(f)
+        except (FileNotFoundError, ValueError):
+            c = {}
+        c.update(changes)
+        tmp = CFG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(c, f, indent=2)
+        os.replace(tmp, CFG_FILE)
+
+
+# Modus: "auto" = Zwischenablage + in Drawboard einfügen, "clipboard" = nur Zwischenablage, "off" = aus
+MODES = {"auto": "Automatisch in Drawboard einfügen",
+         "clipboard": "Nur in die Zwischenablage",
+         "off": "Aus (keine Fotos abholen)"}
 
 log = logging.getLogger(APP)
 log.setLevel(logging.INFO)
@@ -121,8 +155,50 @@ crypt32.CryptProtectData.argtypes = [ctypes.POINTER(DATA_BLOB), wt.LPCWSTR, ctyp
 crypt32.CryptUnprotectData.argtypes = [ctypes.POINTER(DATA_BLOB), ctypes.c_void_p, ctypes.POINTER(DATA_BLOB),
                                        ctypes.c_void_p, ctypes.c_void_p, wt.DWORD, ctypes.POINTER(DATA_BLOB)]
 
+ULONG_PTR = ctypes.c_size_t
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [("wVk", wt.WORD), ("wScan", wt.WORD), ("dwFlags", wt.DWORD),
+                ("time", wt.DWORD), ("dwExtraInfo", ULONG_PTR)]
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", wt.LONG), ("dy", wt.LONG), ("mouseData", wt.DWORD), ("dwFlags", wt.DWORD),
+                ("time", wt.DWORD), ("dwExtraInfo", ULONG_PTR)]
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [("uMsg", wt.DWORD), ("wParamL", wt.WORD), ("wParamH", wt.WORD)]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT), ("hi", HARDWAREINPUT)]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [("type", wt.DWORD), ("u", _INPUTUNION)]
+
+
+user32.SendInput.argtypes = [wt.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
+user32.SendInput.restype = wt.UINT
+user32.MapVirtualKeyW.argtypes = [wt.UINT, wt.UINT]
+user32.MapVirtualKeyW.restype = wt.UINT
+user32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+kernel32.CreateEventW.argtypes = [ctypes.c_void_p, wt.BOOL, wt.BOOL, wt.LPCWSTR]
+kernel32.CreateEventW.restype = wt.HANDLE
+kernel32.SetEvent.argtypes = [wt.HANDLE]
+kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
+kernel32.WaitForSingleObject.restype = wt.DWORD
+
 INVALID_HANDLE = wt.HANDLE(-1).value
 MY_PID = os.getpid()
+
+
+def window_title(hwnd) -> str:
+    buf = ctypes.create_unicode_buffer(512)
+    user32.GetWindowTextW(hwnd, buf, 512)
+    return buf.value
 
 
 def _dpapi(data: bytes, protect: bool) -> bytes:
@@ -169,6 +245,8 @@ def is_drawboard_window(hwnd) -> bool:
     if "drawboard" in exe:
         return True
     if exe == "applicationframehost.exe":  # Store-Apps stecken in einem Rahmenfenster
+        if "drawboard" in window_title(hwnd).lower():
+            return True
         found = [False]
 
         def cb(child, _lp):
@@ -185,6 +263,13 @@ def is_drawboard_window(hwnd) -> bool:
 
 def drawboard_is_foreground() -> bool:
     return is_drawboard_window(user32.GetForegroundWindow())
+
+
+def foreground_info() -> str:
+    """Für die Diagnose: welches Programm ist gerade vorne und wird es als Drawboard erkannt?"""
+    hwnd = user32.GetForegroundWindow()
+    _, exe = window_pid_exe(hwnd)
+    return f"{exe or '?'} – „{window_title(hwnd)[:50]}“ – Drawboard: {'JA' if is_drawboard_window(hwnd) else 'nein'}"
 
 
 def drawboard_is_running() -> bool:
@@ -236,24 +321,39 @@ def inputs_idle() -> bool:
     return all(not (user32.GetAsyncKeyState(k) & 0x8000) for k in _KEYS_THAT_MUST_BE_UP)
 
 
-def paste_into_drawboard() -> bool:
-    """Strg+V nur, wenn Drawboard vorne ist und du gerade nichts drückst. Max. 5 s warten."""
+def _key(vk: int, up: bool) -> INPUT:
+    # Mit echtem Scancode – Store-/moderne Apps wie Drawboard ignorieren Tastendrücke ohne Scancode oft.
+    scan = user32.MapVirtualKeyW(vk, 0)  # MAPVK_VK_TO_VSC
+    inp = INPUT()
+    inp.type = 1  # INPUT_KEYBOARD
+    inp.u.ki = KEYBDINPUT(vk, scan, 0x0002 if up else 0, 0, 0)
+    return inp
+
+
+def send_ctrl_v():
+    VK_CONTROL, VK_V = 0x11, 0x56
+    for vk, up in ((VK_CONTROL, False), (VK_V, False), (VK_V, True), (VK_CONTROL, True)):
+        inp = _key(vk, up)
+        if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT)) != 1:
+            log.warning("SendInput blockiert (Fehler %s)", ctypes.get_last_error())
+        time.sleep(0.03)
+
+
+def paste_into_drawboard():
+    """Strg+V nur, wenn Drawboard vorne ist und du gerade nichts drückst. Max. 5 s warten.
+    Gibt (eingefügt?, Grund) zurück."""
     deadline = time.time() + 5
     while time.time() < deadline:
         hwnd = user32.GetForegroundWindow()
         if not is_drawboard_window(hwnd):
-            return False
+            return False, "Drawboard nicht im Vordergrund (" + foreground_info() + ")"
         if inputs_idle():
             time.sleep(0.15)
             if inputs_idle() and user32.GetForegroundWindow() == hwnd:
-                VK_CONTROL, VK_V, UP = 0x11, 0x56, 0x0002
-                user32.keybd_event(VK_CONTROL, 0, 0, 0)
-                user32.keybd_event(VK_V, 0, 0, 0)
-                user32.keybd_event(VK_V, 0, UP, 0)
-                user32.keybd_event(VK_CONTROL, 0, UP, 0)
-                return True
+                send_ctrl_v()
+                return True, "Strg+V gesendet"
         time.sleep(0.1)
-    return False
+    return False, "Taste/Stift war die ganze Zeit gedrückt"
 
 
 # ---------------------------------------------------------------- Cloud (Nextcloud / WebDAV)
@@ -280,26 +380,22 @@ class Cloud:
 
     # --- Speichern / Laden
     def load(self):
+        c = read_cfg()
+        if not c.get("appPassword"):
+            return
         try:
-            with open(CFG_FILE, encoding="utf-8") as f:
-                c = json.load(f)
             self.server, self.login_name, self.user_id = c["server"], c["loginName"], c["userId"]
             self.password = _dpapi(base64.b64decode(c["appPassword"]), protect=False).decode()
-        except FileNotFoundError:
-            pass
         except Exception as e:
             log.warning("Konfiguration unlesbar: %s", e)
 
     def save(self):
-        c = {}
-        if os.path.exists(CFG_FILE):
-            with open(CFG_FILE, encoding="utf-8") as f:
-                c = json.load(f)
-        c.update(server=self.server, loginName=self.login_name, userId=self.user_id,
-                 appPassword=base64.b64encode(_dpapi(self.password.encode(), protect=True)).decode())
-        with open(CFG_FILE, "w", encoding="utf-8") as f:
-            json.dump(c, f, indent=2)
+        write_cfg(server=self.server, loginName=self.login_name, userId=self.user_id,
+                  appPassword=base64.b64encode(_dpapi(self.password.encode(), protect=True)).decode())
 
+    def logout(self):
+        self.server = self.login_name = self.user_id = self.password = None
+        write_cfg(server=None, loginName=None, userId=None, appPassword=None)
     @property
     def ok(self):
         return bool(self.server and self.password and self.user_id)
@@ -397,15 +493,37 @@ def image_to_clipboard_formats(data: bytes):
     return bmp.getvalue()[14:], png.getvalue()  # DIB = BMP ohne 14-Byte-Dateikopf
 
 
+
+
+def make_test_image() -> bytes:
+    im = Image.new("RGB", (800, 300), "white")
+    d = ImageDraw.Draw(im)
+    d.rectangle((4, 4, 795, 295), outline=(21, 101, 192), width=8)
+    d.text((40, 120), f"Test Drawboard-Kamera  {time.strftime('%H:%M:%S')}", fill=(21, 101, 192))
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return buf.getvalue()
+
+
 class Worker:
     def __init__(self, cloud: Cloud):
         self.cloud = cloud
-        self.paused = False
+        self.mode = read_cfg().get("mode", "auto")
+        if self.mode not in MODES:
+            self.mode = "auto"
         self.stop = threading.Event()
         self.status = "Startet …"
+        self.events = []          # letzte Ereignisse fürs Fenster
         self.icon = None
         self.seen = set()
         self.login_lock = threading.Lock()
+
+    def set_mode(self, mode):
+        if mode in MODES and mode != self.mode:
+            self.mode = mode
+            write_cfg(mode=mode)
+            self.event("Modus: " + MODES[mode])
+            self.set_status(MODES[mode] if mode != "off" else "Aus")
 
     def set_status(self, s):
         if s != self.status:
@@ -414,9 +532,13 @@ class Worker:
         if self.icon:
             try:
                 self.icon.title = f"{TITLE}: {s}"[:127]
-                self.icon.update_menu()
             except Exception:
                 pass
+
+    def event(self, s):
+        log.info(s)
+        self.events.insert(0, time.strftime("%H:%M:%S  ") + s)
+        del self.events[12:]
 
     def notify(self, msg):
         try:
@@ -433,6 +555,7 @@ class Worker:
             try:
                 self.cloud.login(self.set_status)
                 self.set_status("Verbunden – wartet auf Fotos")
+                self.event("Mit TUHH-Cloud verbunden")
                 self.notify("Mit der TUHH-Cloud verbunden.")
             except Exception as e:
                 log.exception("Login")
@@ -442,29 +565,53 @@ class Worker:
 
         threading.Thread(target=run, daemon=True).start()
 
+    def deliver(self, img_bytes: bytes, name: str):
+        dib, png = image_to_clipboard_formats(img_bytes)
+        set_clipboard(dib, png)
+        if self.mode == "auto":
+            pasted, why = paste_into_drawboard()
+        else:
+            pasted, why = False, "Modus „Nur Zwischenablage“"
+        msg = ("In Drawboard eingefügt: " if pasted else "In Zwischenablage: ") + name
+        self.event(f"{msg}  ({why})")
+        self.set_status(msg)
+
     def handle(self, name, url, age):
         if age > STALE_SECONDS:
-            log.info("Altes Foto %s (%.0f s) – nur aus der Cloud entfernt", name, age)
+            self.event(f"Altes Foto {name} ({age / 60:.0f} min) – nicht eingefügt, aus Cloud entfernt")
             self.cloud.delete(url)
             return
         data = self.cloud.download(url)
-        dib, png = image_to_clipboard_formats(data)
-        set_clipboard(dib, png)
-        pasted = paste_into_drawboard()
-        self.cloud.delete(url)  # Original bleibt auf dem Handy
-        self.set_status(("In Drawboard eingefügt: " if pasted else "In Zwischenablage: ") + name)
+        try:
+            self.deliver(data, name)
+        finally:
+            self.cloud.delete(url)  # Original bleibt auf dem Handy
+
+    def test_paste(self):
+        def run():
+            for i in (3, 2, 1):
+                self.set_status(f"Test: Jetzt zu Drawboard wechseln … {i}")
+                time.sleep(1)
+            try:
+                self.deliver(make_test_image(), "Testbild")
+            except Exception as e:
+                log.exception("Test")
+                self.set_status(f"Test fehlgeschlagen: {e}")
+        threading.Thread(target=run, daemon=True).start()
 
     def loop(self):
         backoff = 0
         while not self.stop.is_set():
             interval = POLL_DRAWBOARD_CLOSED
             try:
-                interval = POLL_DRAWBOARD_OPEN if drawboard_is_running() else POLL_DRAWBOARD_CLOSED
-                if self.paused:
-                    self.set_status("Pausiert")
+                if self.mode == "off":
+                    self.set_status("Aus")
+                    interval = 1.0
                 elif not self.cloud.ok:
-                    self.set_status("Nicht mit Cloud verbunden – Rechtsklick aufs Symbol")
+                    self.set_status("Nicht mit Cloud verbunden")
+                    interval = 1.0
                 else:
+                    interval = POLL_DRAWBOARD_OPEN if drawboard_is_running() else POLL_DRAWBOARD_CLOSED
                     for name, url, age in self.cloud.list_photos():
                         if name in self.seen:
                             continue
@@ -473,8 +620,9 @@ class Worker:
                             self.handle(name, url, age)
                         except Exception as e:
                             log.exception("Foto %s", name)
+                            self.event(f"Fehler bei {name}: {e}")
                             self.set_status(f"Fehler bei {name}: {e}")
-                    if self.status.startswith(("Startet", "Nicht mit", "Pausiert", "Keine Verbindung", "Cloud-Login")):
+                    if self.status.startswith(("Startet", "Nicht mit", "Aus", "Keine Verbindung", "Cloud-Login")):
                         self.set_status("Verbunden – wartet auf Fotos")
                 backoff = 0
             except PermissionError:
@@ -487,16 +635,17 @@ class Worker:
             self.stop.wait(interval + backoff)
 
 
-# ---------------------------------------------------------------- Autostart, Tray
+# ---------------------------------------------------------------- Autostart, Startmenü
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+FROZEN = getattr(sys, "frozen", False)
 
 
 def autostart_command():
-    if getattr(sys, "frozen", False):
-        return f'"{sys.executable}"'
+    if FROZEN:
+        return f'"{sys.executable}" --autostart'
     pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    return f'"{pyw}" "{os.path.abspath(__file__)}"'
+    return f'"{pyw}" "{os.path.abspath(__file__)}" --autostart'
 
 
 def autostart_enabled():
@@ -519,6 +668,28 @@ def set_autostart(on: bool):
                 pass
 
 
+def ensure_shortcuts(first_run: bool):
+    """Startmenü-Eintrag anlegen und Autostart-Pfad aktuell halten (falls die .exe verschoben wurde)."""
+    try:
+        if first_run or autostart_enabled():
+            set_autostart(True)
+        if not FROZEN:
+            return
+        exe = sys.executable
+        lnk = os.path.join(os.environ["APPDATA"], r"Microsoft\Windows\Start Menu\Programs", "Drawboard-Kamera.lnk")
+        if read_cfg().get("shortcut_target") == exe and os.path.exists(lnk):
+            return
+        q = lambda s: s.replace("'", "''")  # noqa: E731
+        ps = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{q(lnk)}');"
+              f"$s.TargetPath='{q(exe)}';$s.WorkingDirectory='{q(os.path.dirname(exe))}';"
+              f"$s.Description='Drawboard-Kamera Einstellungen';$s.Save()")
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                       creationflags=0x08000000, timeout=60)  # CREATE_NO_WINDOW
+        write_cfg(shortcut_target=exe)
+    except Exception as e:
+        log.warning("Verknüpfungen: %s", e)
+
+
 def make_icon():
     im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
@@ -530,57 +701,199 @@ def make_icon():
     return im
 
 
+# ---------------------------------------------------------------- Einstellungsfenster
+
+class SettingsWindow:
+    """Öffnet sich nur auf Wunsch: Klick aufs Taskleisten-Symbol, Startmenü oder .exe nochmal starten."""
+
+    def __init__(self, worker: Worker, cloud: Cloud):
+        self.worker, self.cloud = worker, cloud
+        self.icon = None
+        self.queue = queue.Queue()
+        self.visible = False
+        self.last_foreign_fg = "–"
+
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.root.title(TITLE)
+        self.root.resizable(False, False)
+        self.root.protocol("WM_DELETE_WINDOW", self.hide)
+        try:
+            self._icon_img = ImageTk.PhotoImage(make_icon())
+            self.root.iconphoto(True, self._icon_img)
+        except Exception:
+            pass
+        self._build()
+        self.root.after(300, self._tick)
+
+    def _build(self):
+        r = self.root
+        pad = {"padx": 12, "pady": 6}
+        f = ttk.Frame(r, padding=14)
+        f.grid(sticky="nsew")
+
+        self.v_status = tk.StringVar()
+        ttk.Label(f, textvariable=self.v_status, font=("Segoe UI", 11, "bold"), wraplength=460).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        box = ttk.LabelFrame(f, text="Was soll mit neuen Fotos passieren?", padding=8)
+        box.grid(row=1, column=0, columnspan=2, sticky="ew", **pad)
+        self.v_mode = tk.StringVar(value=self.worker.mode)
+        for i, (key, label) in enumerate(MODES.items()):
+            ttk.Radiobutton(box, text=label, value=key, variable=self.v_mode,
+                            command=lambda: self.worker.set_mode(self.v_mode.get())).grid(row=i, column=0, sticky="w")
+
+        self.v_auto = tk.BooleanVar(value=autostart_enabled())
+        ttk.Checkbutton(f, text="Mit Windows starten (unsichtbar im Hintergrund)", variable=self.v_auto,
+                        command=lambda: set_autostart(self.v_auto.get())).grid(row=2, column=0, columnspan=2,
+                                                                               sticky="w", **pad)
+
+        cbox = ttk.LabelFrame(f, text="TUHH-Cloud", padding=8)
+        cbox.grid(row=3, column=0, columnspan=2, sticky="ew", **pad)
+        self.v_cloud = tk.StringVar()
+        ttk.Label(cbox, textvariable=self.v_cloud).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.b_connect = ttk.Button(cbox, text="Verbinden", command=self.worker.start_login)
+        self.b_connect.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.b_logout = ttk.Button(cbox, text="Abmelden", command=self._logout)
+        self.b_logout.grid(row=1, column=1, sticky="w", padx=8, pady=(6, 0))
+
+        dbox = ttk.LabelFrame(f, text="Test & Diagnose", padding=8)
+        dbox.grid(row=4, column=0, columnspan=2, sticky="ew", **pad)
+        ttk.Button(dbox, text="Einfügen testen (3 Sek. Zeit, um zu Drawboard zu wechseln)",
+                   command=self.worker.test_paste).grid(row=0, column=0, sticky="w")
+        self.v_fg = tk.StringVar()
+        ttk.Label(dbox, textvariable=self.v_fg, wraplength=460, foreground="#555").grid(
+            row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(dbox, text="Letzte Ereignisse:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.events = tk.Listbox(dbox, height=7, width=78, activestyle="none")
+        self.events.grid(row=3, column=0, sticky="ew")
+
+        bar = ttk.Frame(f)
+        bar.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(bar, text="Log-Ordner öffnen", command=lambda: os.startfile(CFG_DIR)).pack(side="left")
+        ttk.Button(bar, text="Programm beenden", command=self.quit).pack(side="left", padx=8)
+        ttk.Button(bar, text="Schließen (läuft weiter)", command=self.hide).pack(side="right")
+
+    def _logout(self):
+        self.cloud.logout()
+        self.worker.event("Von der Cloud abgemeldet")
+
+    def show(self):
+        self.visible = True
+        self.v_mode.set(self.worker.mode)
+        self.v_auto.set(autostart_enabled())
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        self.root.after(200, lambda: self.root.attributes("-topmost", False))
+        self.root.focus_force()
+        self._refresh()
+
+    def hide(self):
+        self.visible = False
+        self.root.withdraw()
+
+    def quit(self):
+        self.worker.stop.set()
+        try:
+            if self.icon:
+                self.icon.stop()
+        finally:
+            self.root.destroy()
+
+    def _refresh(self):
+        self.v_status.set(self.worker.status)
+        if self.v_mode.get() != self.worker.mode:  # z. B. über das Taskleisten-Menü geändert
+            self.v_mode.set(self.worker.mode)
+        c = self.cloud
+        self.v_cloud.set(f"✓ Verbunden als {c.login_name}  (Ordner „{FOLDER}“)" if c.ok else "Nicht verbunden")
+        self.b_connect.configure(text="Neu verbinden" if c.ok else "Verbinden")
+        self.b_logout.state(["!disabled"] if c.ok else ["disabled"])
+        self.v_fg.set("Zuletzt aktives Fenster: " + self.last_foreign_fg)
+        items = list(self.events.get(0, "end"))
+        if items != self.worker.events:
+            self.events.delete(0, "end")
+            for e in self.worker.events:
+                self.events.insert("end", e)
+
+    def _tick(self):
+        try:
+            while True:
+                cmd = self.queue.get_nowait()
+                if cmd == "show":
+                    self.show()
+                elif cmd == "quit":
+                    self.quit()
+                    return
+        except queue.Empty:
+            pass
+        try:
+            hwnd = user32.GetForegroundWindow()
+            if hwnd and window_pid_exe(hwnd)[0] != MY_PID:
+                self.last_foreign_fg = foreground_info()
+            if self.visible:
+                self._refresh()
+        except Exception:
+            pass
+        self.root.after(400, self._tick)
+
+
+# ---------------------------------------------------------------- Start
+
 def main():
+    autostart = "--autostart" in sys.argv
     kernel32.CreateMutexW(None, False, "Local\\DrawboardCamSingleInstance")
-    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS → läuft schon
+    already = ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
+    show_event = kernel32.CreateEventW(None, False, False, "Local\\DrawboardCamShowSettings")
+    if already:
+        if not autostart and show_event:
+            kernel32.SetEvent(show_event)  # laufendes Programm soll sein Fenster zeigen
         return
     kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x4000)  # BELOW_NORMAL
 
     first_run = not os.path.exists(CFG_FILE)
+    threading.Thread(target=ensure_shortcuts, args=(first_run,), daemon=True).start()
+
     cloud = Cloud()
     worker = Worker(cloud)
+    win = SettingsWindow(worker, cloud)
 
-    if first_run:
-        try:
-            set_autostart(True)
-        except OSError:
-            pass
-
-    def toggle_pause(icon, item):
-        worker.paused = not worker.paused
-        worker.set_status("Pausiert" if worker.paused else "Läuft")
-
-    def toggle_autostart(icon, item):
-        set_autostart(not autostart_enabled())
-
-    def open_folder(icon, item):
-        os.startfile(CFG_DIR)
-
-    def quit_app(icon, item):
-        worker.stop.set()
-        icon.stop()
+    def tray_mode(mode):
+        return pystray.MenuItem(MODES[mode], lambda i, it: worker.set_mode(mode),
+                                checked=lambda it: worker.mode == mode, radio=True)
 
     menu = pystray.Menu(
-        pystray.MenuItem(lambda item: worker.status[:60], None, enabled=False),
+        pystray.MenuItem("Einstellungen öffnen", lambda i, it: win.queue.put("show"), default=True),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Pausieren", toggle_pause, checked=lambda item: worker.paused),
-        pystray.MenuItem("Mit TUHH-Cloud verbinden …", lambda i, it: worker.start_login()),
-        pystray.MenuItem("Mit Windows starten", toggle_autostart, checked=lambda item: autostart_enabled()),
-        pystray.MenuItem("Log-Ordner öffnen", open_folder),
+        tray_mode("auto"), tray_mode("clipboard"), tray_mode("off"),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Beenden", quit_app),
+        pystray.MenuItem("Beenden", lambda i, it: win.queue.put("quit")),
     )
     icon = pystray.Icon(APP, make_icon(), TITLE, menu)
     worker.icon = icon
+    win.icon = icon
 
-    def setup(ic):
-        ic.visible = True
-        threading.Thread(target=worker.loop, daemon=True).start()
-        if not cloud.ok:
-            worker.start_login()
+    def wait_for_show():
+        while not worker.stop.is_set():
+            if show_event and kernel32.WaitForSingleObject(show_event, 1000) == 0:
+                win.queue.put("show")
 
-    log.info("Gestartet")
-    icon.run(setup)
+    threading.Thread(target=worker.loop, daemon=True).start()
+    threading.Thread(target=wait_for_show, daemon=True).start()
+    icon.run_detached()
+
+    if not cloud.ok and not autostart:
+        worker.start_login()
+    if not autostart:  # von Hand gestartet → Fenster zeigen; beim Windows-Start nicht
+        win.queue.put("show")
+
+    log.info("Gestartet%s", " (Autostart)" if autostart else "")
+    win.root.mainloop()
+    worker.stop.set()
+    try:
+        icon.stop()
+    except Exception:
+        pass
     log.info("Beendet")
 
 

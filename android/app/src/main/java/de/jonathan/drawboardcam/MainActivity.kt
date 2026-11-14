@@ -80,7 +80,7 @@ class MainActivity : AppCompatActivity() {
         orientationListener?.enable()
         refreshThumb()
         val txt = status.text?.toString().orEmpty()
-        if (Cloud.creds(this) == null) status.text = "Nicht mit TUHH-Cloud verbunden – ⚙ unten rechts"
+        if (Cloud.creds(this) == null) status.text = "Nicht mit TUHH-Cloud verbunden –\ntippe unten rechts auf das Zahnrad"
         else if (txt.isEmpty() || txt.startsWith("Nicht mit")) status.text = "Bereit"
     }
 

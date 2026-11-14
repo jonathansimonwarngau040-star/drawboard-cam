@@ -26,6 +26,8 @@ class SettingsActivity : AppCompatActivity() {
         connect = findViewById(R.id.connect)
         logout = findViewById(R.id.logout)
 
+        supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        findViewById<Button>(R.id.back).setOnClickListener { backToCamera() }
         connect.setOnClickListener { startLogin() }
         logout.setOnClickListener {
             Cloud.logout(this)
@@ -64,7 +66,14 @@ class SettingsActivity : AppCompatActivity() {
                 }
                 val (server, login, pw) = result ?: error("Zeit abgelaufen – bitte nochmal versuchen")
                 Cloud.finishLogin(app, server, login, pw)
-                withContext(Dispatchers.Main) { if (!isDestroyed) refresh() }
+                withContext(Dispatchers.Main) {
+                    if (!isDestroyed) {
+                        refresh()
+                        state.text = "✓ Verbunden – zurück zur Kamera …"
+                    }
+                }
+                delay(1200)
+                withContext(Dispatchers.Main) { if (!isDestroyed) backToCamera() }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     if (!isDestroyed) state.text = "Verbinden fehlgeschlagen: ${e.message}"
@@ -73,6 +82,25 @@ class SettingsActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) { if (!isDestroyed) connect.isEnabled = true }
             }
         }
+    }
+
+    /** Holt die Kamera zuverlässig nach vorne, egal was dazwischen (Browser) passiert ist. */
+    private fun backToCamera() {
+        startActivity(
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        )
+        finish()
+    }
+
+    override fun onSupportNavigateUp(): Boolean {
+        backToCamera()
+        return true
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        backToCamera()
     }
 
     override fun onResume() {

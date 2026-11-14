@@ -9,7 +9,9 @@ Unter **Releases → „latest“**:
 
 ## Einrichtung
 1. **Handy:** APK installieren, öffnen, Kamera erlauben, ⚙ → „Mit TUHH-Cloud verbinden“ → im Browser anmelden → „Zugriff gewähren“ → zurück zur App.
-2. **PC:** `DrawboardKamera.exe` starten (Windows-Warnung ggf. mit „Weitere Informationen → Trotzdem ausführen“). Beim ersten Start öffnet sich der TUHH-Login im Browser. Danach sitzt ein blaues Kamera-Symbol unten rechts in der Taskleiste und startet ab jetzt mit Windows.
+2. **PC:** `DrawboardKamera.exe` starten (Windows-Warnung ggf. mit „Weitere Informationen → Trotzdem ausführen“). Beim ersten Start öffnet sich der TUHH-Login im Browser. Danach sitzt ein blaues Kamera-Symbol unten rechts in der Taskleiste und startet ab jetzt unsichtbar mit Windows.
+
+**Einstellungen am PC:** Startmenü → „Drawboard-Kamera“, oder Klick aufs Taskleisten-Symbol. Dort: Modus (automatisch einfügen / nur Zwischenablage / aus), Autostart, Cloud, „Einfügen testen“ und die letzten Ereignisse. Das Fenster öffnet sich nie von selbst.
 
 Der Cloud-Ordner `DrawboardCam` wird automatisch angelegt.
 
