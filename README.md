@@ -15,6 +15,17 @@ Unter **Releases → „latest“**:
 
 Der Cloud-Ordner `DrawboardCam` wird automatisch angelegt.
 
+## Zoom
+Balken über dem Auslöser (logarithmisch), Schnelltasten **0,5× / 1× / 2× / 5×** und Zwei-Finger-Zoom. Das Pixel wechselt dabei selbst die Linse: 0,5× = Ultraweitwinkel, ab 1× Hauptkamera, 2× = Sensor-Ausschnitt in fast optischer Qualität, darüber digital (max. 10×). Einmal tippen = dort scharfstellen.
+
+## Tafel-/Folien-Scan
+Scan-Taste (links neben dem Zahnrad) einschalten → im Sucher erscheint live ein blauer Rahmen um die erkannte Tafel/Folie. Nach dem Foto:
+- 3 Sekunden Vorschau mit dem erkannten Viereck → wird dann automatisch gesendet.
+- Ecke antippen stoppt den Countdown; Ecken mit Lupe verschieben → „Jetzt senden“. Lautstärketaste = sofort senden, Zurück = nicht senden.
+- Gesendet wird nur das entzerrte Bild (`…_scan.jpg`, Kontrast + Schärfe verbessert, Folien rasten auf 16:9/4:3 ein). Das Original bleibt nur auf dem Handy.
+
+Läuft komplett lokal mit OpenCV, kein Google-Dokumentenscanner.
+
 ## Verhalten
 | Situation | Was passiert |
 |---|---|

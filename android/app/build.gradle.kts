@@ -13,6 +13,8 @@ android {
         targetSdk = 34
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
         versionName = "1.0." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+        // Pixel 8 ist reines 64-Bit-ARM – hält die APK trotz OpenCV klein.
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     signingConfigs {
@@ -54,4 +56,6 @@ dependencies {
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // Tafel-/Folien-Erkennung und Entzerrung (läuft komplett auf dem Handy, kein Google-Dienst)
+    implementation("org.opencv:opencv:4.10.0")
 }

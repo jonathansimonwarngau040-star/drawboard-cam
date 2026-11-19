@@ -9,6 +9,12 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <!-- Live-Rahmen im Scan-Modus -->
+    <de.jonathan.drawboardcam.QuadOverlayView
+        android:id="@+id/quadOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
     <TextView
         android:id="@+id/status"
         android:layout_width="wrap_content"
@@ -22,6 +28,32 @@
         android:paddingBottom="6dp"
         android:textColor="#FFFFFF"
         android:textSize="15sp" />
+
+    <!-- Zoom: Schnelltasten + Balken -->
+    <LinearLayout
+        android:id="@+id/zoomPanel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginBottom="124dp"
+        android:gravity="center_horizontal"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/zoomChips"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal" />
+
+        <SeekBar
+            android:id="@+id/zoomBar"
+            android:layout_width="300dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:max="1000"
+            android:paddingTop="10dp"
+            android:paddingBottom="10dp" />
+    </LinearLayout>
 
     <FrameLayout
         android:layout_width="match_parent"
@@ -48,6 +80,17 @@
             android:contentDescription="Foto aufnehmen" />
 
         <ImageButton
+            android:id="@+id/scanToggle"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="end|center_vertical"
+            android:layout_marginEnd="96dp"
+            android:background="@drawable/scan_toggle_bg"
+            android:contentDescription="Tafel-/Folien-Scan an/aus"
+            android:scaleType="center"
+            android:src="@drawable/ic_scan" />
+
+        <ImageButton
             android:id="@+id/settings"
             android:layout_width="56dp"
             android:layout_height="56dp"
@@ -57,5 +100,62 @@
             android:contentDescription="@string/settings"
             android:scaleType="center"
             android:src="@drawable/ic_gear" />
+    </FrameLayout>
+
+    <!-- Nach einem Scan: Ecken prüfen/verschieben, sendet sonst automatisch -->
+    <FrameLayout
+        android:id="@+id/review"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#FF000000"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone">
+
+        <de.jonathan.drawboardcam.CropView
+            android:id="@+id/cropView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_marginTop="64dp"
+            android:layout_marginBottom="88dp" />
+
+        <TextView
+            android:id="@+id/reviewHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:layout_marginTop="20dp"
+            android:gravity="center"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="88dp"
+            android:layout_gravity="bottom"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/reviewCancel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="24dp"
+                android:backgroundTint="#424242"
+                android:text="Nicht senden"
+                android:textAllCaps="false"
+                android:textColor="#FFFFFF" />
+
+            <Button
+                android:id="@+id/reviewSend"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:backgroundTint="#1E88E5"
+                android:text="Jetzt senden"
+                android:textAllCaps="false"
+                android:textColor="#FFFFFF" />
+        </LinearLayout>
     </FrameLayout>
 </FrameLayout>
